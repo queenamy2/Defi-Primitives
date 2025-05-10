@@ -10,6 +10,12 @@
 (define-constant ERR-NOT-ACTIVE (err u105))
 (define-constant ERR-ALREADY-INITIALIZED (err u106))
 (define-constant ERR-EXPIRED (err u107))
+(define-constant ERR-INVALID-PRINCIPAL (err u108))
+(define-constant ERR-INVALID-TOKEN-ID (err u109))
+(define-constant ERR-INVALID-AMOUNT (err u110))
+(define-constant ERR-INVALID-WEIGHT (err u111))
+(define-constant ERR-INVALID-CURVE-TYPE (err u112))
+(define-constant ERR-INVALID-CURVE-PARAMS (err u113))
 
 ;; Contract variables
 (define-data-var contract-owner principal tx-sender)
@@ -33,8 +39,42 @@
 (define-constant MIN_LIQUIDITY u1000) ;; Minimum liquidity to start
 (define-constant MAX_WEIGHT u1000000) ;; Maximum weight for a token (100%)
 (define-constant BLOCKS_PER_YEAR u52560) ;; ~365 days with 10-minute blocks
+(define-constant MAX_TOKEN_ID u1000000) ;; Maximum token ID allowed
+(define-constant MAX_AMOUNT u1000000000000) ;; Maximum amount allowed (1 trillion)
 
 ;; Helper functions
+
+;; Validate principal is not null
+(define-private (validate-principal (address principal))
+  (if (is-eq address tx-sender)
+      true
+      (if (is-eq address (var-get contract-owner))
+          true
+          (if (is-some (map-get? liquidity-providers address))
+              true
+              false))))
+
+;; Validate token ID is within range
+(define-private (validate-token-id (token-id uint))
+  (< token-id MAX_TOKEN_ID))
+
+;; Validate amount is within range
+(define-private (validate-amount (amount uint))
+  (and (> amount u0) (< amount MAX_AMOUNT)))
+
+;; Validate weight is within range
+(define-private (validate-weight (weight uint))
+  (<= weight MAX_WEIGHT))
+
+;; Validate curve type
+(define-private (validate-curve-type (curve-type (string-ascii 20)))
+  (or (is-eq curve-type "linear") 
+      (is-eq curve-type "exponential") 
+      (is-eq curve-type "constant")))
+
+;; Validate curve params
+(define-private (validate-curve-params (params (list 5 uint)))
+  (and (>= (len params) u1) (<= (len params) u5)))
 
 ;; Non-recursive power function (supports limited exponents)
 (define-private (pow-uint (base uint) (exp uint))
@@ -191,6 +231,9 @@
 (define-public (initialize (owner principal))
   (begin
     (asserts! (not (var-get contract-initialized)) ERR-ALREADY-INITIALIZED)
+    ;; Validate owner principal
+    (asserts! (validate-principal owner) ERR-INVALID-PRINCIPAL)
+    ;; Set owner after validation
     (var-set contract-owner owner)
     (var-set contract-initialized true)
     (ok true)))
@@ -199,6 +242,9 @@
 (define-public (set-owner (new-owner principal))
   (begin
     (asserts! (is-owner) ERR-OWNER-ONLY)
+    ;; Validate new owner principal
+    (asserts! (validate-principal new-owner) ERR-INVALID-PRINCIPAL)
+    ;; Set new owner after validation
     (var-set contract-owner new-owner)
     (ok true)))
 
@@ -223,10 +269,19 @@
   (begin
     (asserts! (is-owner) ERR-OWNER-ONLY)
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
-    (asserts! (<= weight MAX_WEIGHT) ERR-INVALID-PARAMETER)
+    
+    ;; Validate inputs
+    (asserts! (validate-token-id token-id) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-amount initial-reserve) ERR-INVALID-AMOUNT)
+    (asserts! (validate-weight weight) ERR-INVALID-WEIGHT)
     (asserts! (is-none (map-get? token-pools token-id)) ERR-INVALID-PARAMETER)
+    
+    ;; Create pool with validated inputs
     (map-set token-pools token-id {reserve: initial-reserve, weight: weight})
+    
+    ;; Update total liquidity
     (var-set total-liquidity (+ (var-get total-liquidity) initial-reserve))
+    
     (ok true)))
 
 ;; Set bonding curve for a token
@@ -234,15 +289,25 @@
   (begin
     (asserts! (is-owner) ERR-OWNER-ONLY)
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
-    (asserts! (or (is-eq curve-type "linear") (is-eq curve-type "exponential") (is-eq curve-type "constant")) ERR-INVALID-PARAMETER)
+    
+    ;; Validate inputs
+    (asserts! (validate-token-id token-id) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-curve-type curve-type) ERR-INVALID-CURVE-TYPE)
+    (asserts! (validate-curve-params params) ERR-INVALID-CURVE-PARAMS)
+    
+    ;; Set bonding curve with validated inputs
     (map-set bonding-curves token-id {type: curve-type, params: params})
+    
     (ok true)))
 
 ;; Add liquidity to a pool
 (define-public (add-liquidity (token-id uint) (amount uint))
   (begin
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
-    (asserts! (> amount u0) ERR-INVALID-PARAMETER)
+    
+    ;; Validate inputs
+    (asserts! (validate-token-id token-id) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-amount amount) ERR-INVALID-AMOUNT)
     
     ;; Get current pool
     (let (
@@ -253,7 +318,7 @@
       (provider-amount (get amount provider-info))
     )
     
-    ;; Update pool
+    ;; Update pool with validated token-id
     (map-set token-pools token-id {
       reserve: (+ current-reserve amount),
       weight: (get weight pool)
@@ -274,6 +339,10 @@
 (define-public (remove-liquidity (token-id uint) (amount uint))
   (begin
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
+    
+    ;; Validate inputs
+    (asserts! (validate-token-id token-id) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-amount amount) ERR-INVALID-AMOUNT)
     
     ;; Get current pool and provider data
     (let (
@@ -308,15 +377,23 @@
 (define-public (deposit (token-id uint) (amount uint))
   (begin
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
-    (asserts! (> amount u0) ERR-INVALID-PARAMETER)
+    
+    ;; Validate inputs
+    (asserts! (validate-token-id token-id) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-amount amount) ERR-INVALID-AMOUNT)
     
     (let (
       (current-balance (get-balance tx-sender token-id))
+      (new-balance (+ current-balance amount))
     )
     
+    ;; Validate new balance doesn't overflow
+    (asserts! (validate-amount new-balance) ERR-INVALID-AMOUNT)
+    
+    ;; Update balance with validated inputs
     (map-set user-balances 
       {user: tx-sender, token-id: token-id}
-      {amount: (+ current-balance amount)})
+      {amount: new-balance})
     
     (ok true))))
 
@@ -325,12 +402,17 @@
   (begin
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
     
+    ;; Validate inputs
+    (asserts! (validate-token-id token-id) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-amount amount) ERR-INVALID-AMOUNT)
+    
     (let (
       (current-balance (get-balance tx-sender token-id))
     )
     
     (asserts! (>= current-balance amount) ERR-INSUFFICIENT-BALANCE)
     
+    ;; Update balance with validated inputs
     (map-set user-balances 
       {user: tx-sender, token-id: token-id}
       {amount: (- current-balance amount)})
@@ -341,7 +423,11 @@
 (define-public (swap (token-in uint) (token-out uint) (amount-in uint))
   (begin
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
-    (asserts! (> amount-in u0) ERR-INVALID-PARAMETER)
+    
+    ;; Validate inputs
+    (asserts! (validate-token-id token-in) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-token-id token-out) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-amount amount-in) ERR-INVALID-AMOUNT)
     (asserts! (not (is-eq token-in token-out)) ERR-INVALID-PARAMETER)
     
     (let (
@@ -353,11 +439,15 @@
       (amount-out (calculate-swap-price token-in token-out amount-in))
     )
     
+    ;; Additional validations
+    (asserts! (> amount-out u0) ERR-INVALID-AMOUNT)
+    (asserts! (validate-amount amount-out) ERR-INVALID-AMOUNT)
+    
     ;; Check balances
     (asserts! (>= user-balance-in amount-in) ERR-INSUFFICIENT-BALANCE)
     (asserts! (>= reserve-out amount-out) ERR-POOL-DEPLETED)
     
-    ;; Update user balances
+    ;; Update user balances with validated inputs
     (map-set user-balances 
       {user: tx-sender, token-id: token-in}
       {amount: (- user-balance-in amount-in)})
@@ -386,7 +476,11 @@
 (define-public (stake (pool-id uint) (amount uint) (lock-blocks uint))
   (begin
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
-    (asserts! (> amount u0) ERR-INVALID-PARAMETER)
+    
+    ;; Validate inputs
+    (asserts! (validate-token-id pool-id) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-amount amount) ERR-INVALID-AMOUNT)
+    (asserts! (> lock-blocks u0) ERR-INVALID-PARAMETER)
     
     (let (
       (user-balance (get-balance tx-sender pool-id))
@@ -401,7 +495,7 @@
       {user: tx-sender, token-id: pool-id}
       {amount: (- user-balance amount)})
     
-    ;; Update or create staking position
+    ;; Update or create staking position with validated pool-id
     (if (is-some existing-position)
         (let (
           (position (unwrap-panic existing-position))
@@ -409,17 +503,21 @@
           (current-rewards (get rewards position))
           (current-end-block (get end-block position))
           (new-end-block (+ block-height lock-blocks))
+          (new-total-amount (+ current-amount amount))
         )
+        ;; Validate new total amount
+        (asserts! (validate-amount new-total-amount) ERR-INVALID-AMOUNT)
+        
         (map-set staking-positions
           {user: tx-sender, pool-id: pool-id}
           {
-            amount: (+ current-amount amount),
+            amount: new-total-amount,
             rewards: current-rewards,
             start-block: (get start-block position),
             end-block: (if (> new-end-block current-end-block) new-end-block current-end-block)
           }))
         
-        ;; Create new position
+        ;; Create new position with validated pool-id
         (map-set staking-positions
           {user: tx-sender, pool-id: pool-id}
           {
@@ -436,6 +534,9 @@
   (begin
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
     
+    ;; Validate input
+    (asserts! (validate-token-id pool-id) ERR-INVALID-TOKEN-ID)
+    
     (let (
       (position (unwrap! (map-get? staking-positions {user: tx-sender, pool-id: pool-id}) ERR-INVALID-PARAMETER))
       (staked-amount (get amount position))
@@ -449,19 +550,27 @@
     ;; Calculate final rewards
     (let (
       (final-rewards (calculate-staking-rewards tx-sender pool-id))
+      (current-balance-pool (get-balance tx-sender pool-id))
+      (current-balance-rewards (get-balance tx-sender u0))
+      (new-balance-pool (+ current-balance-pool staked-amount))
+      (new-balance-rewards (+ current-balance-rewards final-rewards))
     )
     
-    ;; Return tokens to user
+    ;; Validate new balances
+    (asserts! (validate-amount new-balance-pool) ERR-INVALID-AMOUNT)
+    (asserts! (validate-amount new-balance-rewards) ERR-INVALID-AMOUNT)
+    
+    ;; Return tokens to user with validated pool-id
     (map-set user-balances 
       {user: tx-sender, token-id: pool-id}
-      {amount: (+ (get-balance tx-sender pool-id) staked-amount)})
+      {amount: new-balance-pool})
     
     ;; Return rewards to user
     (map-set user-balances 
       {user: tx-sender, token-id: u0} ;; Rewards token
-      {amount: (+ (get-balance tx-sender u0) final-rewards)})
+      {amount: new-balance-rewards})
     
-    ;; Delete staking position
+    ;; Delete staking position with validated pool-id
     (map-delete staking-positions {user: tx-sender, pool-id: pool-id})
     
     (ok final-rewards)))))
@@ -471,17 +580,25 @@
   (begin
     (asserts! (var-get is-active) ERR-NOT-ACTIVE)
     
+    ;; Validate input
+    (asserts! (validate-token-id pool-id) ERR-INVALID-TOKEN-ID)
+    
     (let (
       (position (unwrap! (map-get? staking-positions {user: tx-sender, pool-id: pool-id}) ERR-INVALID-PARAMETER))
       (current-rewards (calculate-staking-rewards tx-sender pool-id))
+      (current-balance (get-balance tx-sender u0))
+      (new-balance (+ current-balance current-rewards))
     )
+    
+    ;; Validate new balance
+    (asserts! (validate-amount new-balance) ERR-INVALID-AMOUNT)
     
     ;; Update user balance with rewards
     (map-set user-balances 
       {user: tx-sender, token-id: u0} ;; Rewards token
-      {amount: (+ (get-balance tx-sender u0) current-rewards)})
+      {amount: new-balance})
     
-    ;; Reset rewards in staking position
+    ;; Reset rewards in staking position with validated pool-id
     (map-set staking-positions
       {user: tx-sender, pool-id: pool-id}
       {
@@ -500,23 +617,31 @@
   (begin
     (asserts! (is-owner) ERR-OWNER-ONLY)
     
+    ;; Validate inputs
+    (asserts! (validate-token-id token-id) ERR-INVALID-TOKEN-ID)
+    (asserts! (validate-amount amount) ERR-INVALID-AMOUNT)
+    (asserts! (validate-principal recipient) ERR-INVALID-PRINCIPAL)
+    
     (let (
       (pool (unwrap! (map-get? token-pools token-id) ERR-INVALID-PARAMETER))
       (current-reserve (get reserve pool))
+      (recipient-balance (get-balance recipient token-id))
+      (new-balance (+ recipient-balance amount))
     )
     
     (asserts! (>= current-reserve amount) ERR-POOL-DEPLETED)
+    (asserts! (validate-amount new-balance) ERR-INVALID-AMOUNT)
     
-    ;; Update pool
+    ;; Update pool with validated token-id
     (map-set token-pools token-id {
       reserve: (- current-reserve amount),
       weight: (get weight pool)
     })
     
-    ;; Send to recipient
+    ;; Send to recipient with validated inputs
     (map-set user-balances 
       {user: recipient, token-id: token-id}
-      {amount: (+ (get-balance recipient token-id) amount)})
+      {amount: new-balance})
     
     ;; Update total liquidity
     (var-set total-liquidity (- (var-get total-liquidity) amount))
